@@ -16,6 +16,17 @@ argsubparsers = argparser.add_subparsers(title='Command', dest='command', help='
 argsp = argsubparsers.add_parser('init', help='Initialize a new, empty repository.')
 argsp.add_argument('path', metavar='directory', nargs='?', default='.', help='Where to create the repository.')
 
+# cat-file
+argsp = argsubparsers.add_parser('cat-file', help='Provide content of repository objects')
+argsp.add_argument('type', metavar='type', choices=['blob', 'commit', 'tag', 'tree'], help='Specify the type')
+argsp.add_argument('object', metavar='object', help='The object to display')
+
+# hash-object
+argsp = argsubparsers.add_parser('hash-object', help='Compute object ID and optionally creates a blob from a file')
+argsp.add_argument('-t', metavar='type', dest='type', choices=['blob', 'commit', 'tag', 'tree'], default='blob', help='Specify the type')
+argsp.add_argument('-w', dest='write', action='store_true', help='Actually write the object into the database')
+argsp.add_argument('path', help='Read object from <file>')
+
 
 class GitRepository:
     """A Git repository"""
@@ -144,12 +155,140 @@ def repo_default_config():
     return ret
 
 
+class GitObject:
+    """Abstracts git object
+
+    Git object has predefined structure: It starts with object type followed by
+    then ASCII space (0x20), then length of the file and null separator (0x00).
+    Then followed content of the file
+    """
+
+    repo = None
+
+    def __init__(self, repo, data=None):
+        self.repo = repo
+
+        if data is not None:
+            self.deserialize(data)
+
+    def serialize(self):
+        """Converts content to readable format"""
+        raise Exception('Unimplemented!')
+
+    def deserialize(self, data):
+        raise Exception('Unimplemented!')
+
+
+class GitCommit(GitObject):
+    pass
+
+
+class GitTree(GitObject):
+    pass
+
+
+class GitTag(GitObject):
+    pass
+
+
+class GitBlob(GitObject):
+    fmt = b'blob'
+
+    def serialize(self):
+        return self.blobdata
+
+    def deserialize(self, data):
+        self.blobdata = data
+
+
+def object_find(repo, name, fmt=None, follow=True):
+    return name
+
+
+def object_read(repo, sha):
+    """Read object object_id from Git repository repo. Return a GitObject whose
+    exact type depends on the object."""
+
+    path = repo_path(repo, 'objects', sha[0:2], sha[2:])
+
+    with open(path, 'rb') as f:
+        raw = zlib.decompress(f.read())
+
+        # Read object type
+        x = raw.find(b' ')
+        fmt = raw[0:x]
+
+        # Read and validate object size
+        y = raw.find(b'\x00', x)
+        size = int(raw[x:y].decode('ascii'))
+        if size != len(raw)-y-1:
+            raise Exception('Malformed object {0}: bad length'.format(sha))
+
+        # Pick constructor
+        if fmt == b'commit' : c=GitCommit
+        elif fmt == b'tree' : c=GitTree
+        elif fmt == b'tag'  : c=GitTag
+        elif fmt == b'blob' : c=GitBlob
+        else:
+            raise Exception('Unknown type %s for object %s'.format(fmt.decode('ascii'), sha))
+
+        # Call constructor and return object
+        return c(repo, raw[y+1:])
+
+
+def object_write(obj, actually_write=True):
+    """Write object to the Git repository repo. Return the object's sha."""
+
+    # Serialize object data
+    data = obj.serialize()
+
+    # Add header
+    result = obj.fmt + b' ' + str(len(data)).encode() + b'\x00' + data
+
+    # Compute hash
+    sha = hashlib.sha1(result).hexdigest()
+
+    if actually_write:
+        # Compute path
+        path = repo_file(obj.repo, 'objects', sha[0:2], sha[2:], mkdir=actually_write)
+
+        # Write to file
+        with open(path, 'wb') as f:
+            f.write(zlib.compress(result))
+
+    return sha
+
+
+def cat_file(repo, obj, fmt=None):
+    obj = object_find(repo, obj, fmt=fmt, follow=True)
+    obj = object_read(repo, obj)
+    sys.stdout.buffer.write(obj.serialize())
+
+
+def object_hash(fd, fmt, repo=None):
+    data = fd.read()
+
+    if fmt == b'commit':
+        obj = GitCommit(repo, data)
+    elif fmt == b'tree':
+        obj = GitTree(repo, data)
+    elif fmt == b'tag':
+        obj = GitTag(repo, data)
+    elif fmt == b'blob':
+        obj = GitBlob(repo, data)
+    else:
+        raise Exception('Unknown type %s!' % fmt.decode('ascii'))
+
+    return object_write(obj, repo)
+
+
 def cmd_add(args):
     pass
 
 
 def cmd_cat_file(args):
-    pass
+    repo = repo_find()
+    cat_file(repo, args.object, fmt=args.type.encode())
 
 
 def cmd_checkout(args):
@@ -161,7 +300,14 @@ def cmd_commit(args):
 
 
 def cmd_hash_object(args):
-    pass
+    if args.write:
+        repo = GitRepository('.')
+    else:
+        repo = None
+
+    with open(args.path, 'rb') as fd:
+        sha = object_hash(fd, args.type.encode(), repo=repo)
+        print(sha)
 
 
 def cmd_init(args):

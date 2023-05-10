@@ -180,7 +180,13 @@ class GitObject:
 
 
 class GitCommit(GitObject):
-    pass
+    fmt = b'commit'
+
+    def deserialize(self, data):
+        self.kvlm = kvlm_parse(data)
+
+    def serialize(self):
+        return kvlm_serialize(self.kvlm)
 
 
 class GitTree(GitObject):
@@ -280,6 +286,70 @@ def object_hash(fd, fmt, repo=None):
         raise Exception('Unknown type %s!' % fmt.decode('ascii'))
 
     return object_write(obj, repo)
+
+
+def kvlm_parse(raw, start=0, dct=None):
+    """key-value list and message parser"""
+    if not dct:
+        dct = collections.OrderedDict()
+
+    # search next space and new line
+    spc = raw.find(b' ', start)
+    nl = raw.find(b'\n', start)
+
+    # if newline is the first or there is no space, then
+    # remains message
+    if (spc < 0) or (nl < spc):
+        assert(nl == start)
+        dct[b''] = raw[start+1:]
+        return dct
+
+    # parse key values recursive
+    key = raw[start:spc]
+
+    end = start
+    while True:
+        end = raw.find(b'\n', end+1)
+        if raw[end+1] != ord(' '):
+            break
+
+    # grab the value and remove leading spaces
+    value = raw[spc+1, end].replace(b'\n ', b' ')
+
+    # don't override existing value
+    if key in dict:
+        if type(dct[key]) == list:
+            dct[key].append(value)
+        else:
+            dct[key] = [dct[key], value]
+    else:
+        dct[key] = value
+
+    return kvlm_parse(raw, start=end+1, dct=dct)
+
+
+def kvlm_serialize(kvlm):
+    """key-value list and message serializer"""
+    ret = b''
+
+    # output fields
+    for k in kvlm.keys():
+        # skip the message itself
+        if k == b'':
+            continue
+
+        val = kvlm[k]
+        # normalize to list
+        if type(val) != list:
+            val = [val]
+
+        for v in val:
+            ret += k + b' ' + (v.replace(b'\n', b'\n ')) + b'\n'
+
+    # append message
+    ret += b'\n' + kvlm[b'']
+
+    return ret
 
 
 def cmd_add(args):
